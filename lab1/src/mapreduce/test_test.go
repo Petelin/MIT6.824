@@ -58,7 +58,8 @@ func check(t *testing.T, files []string) {
 		defer input.Close()
 		inputScanner := bufio.NewScanner(input)
 		for inputScanner.Scan() {
-			lines = append(lines, inputScanner.Text())
+			a := inputScanner.Text()
+			lines = append(lines, a)
 		}
 	}
 

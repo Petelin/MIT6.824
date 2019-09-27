@@ -2,6 +2,7 @@ package mapreduce
 
 import (
     "bufio"
+    "context"
     "encoding/json"
     "hash/fnv"
     "os"
@@ -62,55 +63,60 @@ func doMap(
     }
 
     var kvChan = make(chan KeyValue, 1000)
-    go writeWorker(kvChan, jobName, mapTask, nReduce)
 
-    reader := bufio.NewReaderSize(fd, 10240)
+    ctx, cancel := context.WithCancel(context.TODO())
+    go func() {
+        writeWorker(kvChan, jobName, mapTask, nReduce)
+        cancel()
+    }()
 
-    isPrefix := true
-    for ; isPrefix; {
+    reader := bufio.NewReader(fd)
+
+    for {
         var lines []byte
-        var ierr error
-        lines, isPrefix, ierr = reader.ReadLine()
-        if ierr != nil {
-            debug("fail to read %s, err: %v", inFile, err)
-            return
-        }
-        for _, line := range lines {
-            keyValues := mapF(inFile, string(line))
-            for _, item := range keyValues {
-                kvChan <- item
+
+        for {
+            line, isPrefix, err := reader.ReadLine()
+            if err != nil {
+                debug("fail to read %s, err: %v", inFile, err)
+                return
             }
+            lines = append(lines, line...)
+
+            if !isPrefix{
+               break
+            }
+        }
+
+        if len(lines) == 0 {
+            break
+        }
+        keyValues := mapF(inFile, string(lines))
+        for _, item := range keyValues {
+            kvChan <- item
         }
     }
     close(kvChan)
+    <-ctx.Done()
 }
 
 func writeWorker(kvChan chan KeyValue, jobName string, mapTask int, nReduce int) {
-    writeFd := map[string]*os.File{}
+    writeFd := map[string]*json.Encoder{}
     for kv := range kvChan {
         reduceFile := reduceName(jobName, mapTask, ihash(kv.Key)%nReduce)
-        var fd *os.File
+        var ec *json.Encoder
         var ok bool
-        if fd, ok = writeFd[reduceFile]; !ok {
-            fd,err:= os.Create(reduceFile)
-            if err != nil{
+        if ec, ok = writeFd[reduceFile]; !ok {
+            fd, err := os.Create(reduceFile)
+            defer fd.Close()
+            defer fd.Sync()
+            if err != nil {
                 debug("create reduce, err: %v", err)
             }
-            writeFd[reduceFile] = fd
-
-            bs, _ := json.Marshal(kv)
-            bs = append(bs, '\n')
-            fd.Write(bs)
+            ec = json.NewEncoder(fd)
+            writeFd[reduceFile] = ec
         }
-        bs, _ := json.Marshal(kv)
-        bs = append(bs, '\n')
-        fd.Write(bs)
-    }
-    for _, fd := range writeFd{
-        err := fd.Close()
-        if err != nil {
-            debug("close tmp file error %v", err)
-        }
+        ec.Encode(&kv)
     }
 }
 
